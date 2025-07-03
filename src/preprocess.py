@@ -15,9 +15,8 @@ def get_dataloader(batch_size=64, subset_size=256, train=True):
         DataLoader for CIFAR-10 dataset
     """
     transform = transforms.Compose([
-        transforms.Resize(32),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        transforms.Normalize((0.5,), (0.5,))
     ])
     
     dataset = datasets.CIFAR10(
