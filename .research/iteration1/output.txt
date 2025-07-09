@@ -14,8 +14,192 @@ Using Pendulum-v1 environment (MuJoCo not available)
 Environment: Pendulum-v1
 State dimension: 3
 Action dimension: 1
+Action space: Box(-2.0, 2.0, (1,), float32)
+Observation space: Box([-1. -1. -8.], [1. 1. 8.], (3,), float32)
 Device: cuda
-Training Baseline BC Agent (minimal iterations)...
+Training iterations: 10 (minimal for testing)
 
-ERROR: Experiment failed with exception: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu! (when checking argument for argument mat1 in method wrapper_CUDA_addmm)
-Stack trace:
+------------------------------------------------------------
+TRAINING BASELINE BC AGENT
+------------------------------------------------------------
+BC Policy architecture: PolicyNet(
+  (fc): Sequential(
+    (0): Linear(in_features=3, out_features=256, bias=True)
+    (1): ReLU()
+    (2): Linear(in_features=256, out_features=256, bias=True)
+    (3): ReLU()
+    (4): Linear(in_features=256, out_features=1, bias=True)
+  )
+)
+Starting baseline behavioral cloning training...
+Training agent on device: cuda:0
+Policy parameters: 67073
+[Training] Iteration 0/9, Episode Reward: -1907.47, Steps: 200, Avg Loss: 0.000000, Confidence: 1.000
+[Training] Iteration 2/9, Episode Reward: -1482.70, Steps: 200, Avg Loss: 0.000000, Confidence: 1.000
+[Training] Iteration 4/9, Episode Reward: -1021.47, Steps: 200, Avg Loss: 0.000000, Confidence: 1.000
+[Training] Iteration 6/9, Episode Reward: -1303.16, Steps: 200, Avg Loss: 0.000000, Confidence: 1.000
+[Training] Iteration 8/9, Episode Reward: -1169.20, Steps: 200, Avg Loss: 0.000000, Confidence: 1.000
+Training completed. Total steps: 2000, Avg reward: -1304.39
+
+------------------------------------------------------------
+TRAINING DESIL AGENT
+------------------------------------------------------------
+DESIL Policy architecture: PolicyNet(
+  (fc): Sequential(
+    (0): Linear(in_features=3, out_features=256, bias=True)
+    (1): ReLU()
+    (2): Linear(in_features=256, out_features=256, bias=True)
+    (3): ReLU()
+    (4): Linear(in_features=256, out_features=1, bias=True)
+  )
+)
+DESIL Diffusion architecture: DiffusionModel(
+  (net): Sequential(
+    (0): Linear(in_features=4, out_features=128, bias=True)
+    (1): ReLU()
+    (2): Linear(in_features=128, out_features=1, bias=True)
+    (3): Sigmoid()
+  )
+)
+Starting DESIL training with diffusion confidence weighting...
+Training agent on device: cuda:0
+Policy parameters: 67073
+Diffusion parameters: 769
+[Training] Iteration 0/9, Episode Reward: -1179.23, Steps: 200, Avg Loss: 0.000000, Confidence: 0.576
+[Training] Iteration 2/9, Episode Reward: -1493.21, Steps: 200, Avg Loss: 0.000000, Confidence: 0.559
+[Training] Iteration 4/9, Episode Reward: -1625.70, Steps: 200, Avg Loss: 0.000000, Confidence: 0.496
+[Training] Iteration 6/9, Episode Reward: -1533.76, Steps: 200, Avg Loss: 0.000000, Confidence: 0.461
+[Training] Iteration 8/9, Episode Reward: -1412.47, Steps: 200, Avg Loss: 0.000000, Confidence: 0.400
+Training completed. Total steps: 2000, Avg reward: -1425.78
+
+------------------------------------------------------------
+PERFORMANCE COMPARISON RESULTS
+------------------------------------------------------------
+Baseline BC - Average reward: -1304.39 ± 232.31
+DESIL Agent - Average reward: -1425.78 ± 137.45
+Performance improvement: -9.3%
+Plot saved as .research/iteration1/images/reward_comparison.pdf
+Performance comparison plot saved to: .research/iteration1/images/reward_comparison.pdf
+Experiment 1 complete.
+
+
+================================================================================
+EXPERIMENT 2: Ablation Study on the Self-Guided Refinement Loop
+================================================================================
+Using Pendulum-v1 environment (MuJoCo not available)
+Environment: Pendulum-v1
+State dimension: 3
+Action dimension: 1
+Device: cuda
+Ablation study: Comparing DESIL with vs without self-guided refinement
+
+------------------------------------------------------------
+TRAINING FULL DESIL (WITH SELF-GUIDED REFINEMENT)
+------------------------------------------------------------
+Training DESIL with dual-phase approach (expert + self-guided refinement)...
+DESIL with Refinement - Phase transition at iteration 5
+Confidence threshold: 0.8
+[Phase 1 - Expert Imitation] Iteration 0
+[DESIL with Refinement] Iteration 0, Episode Reward: -1498.34, Loss: 0.003125
+[Phase 1 - Expert Imitation] Iteration 1
+[Phase 1 - Expert Imitation] Iteration 2
+[DESIL with Refinement] Iteration 2, Episode Reward: -1300.60, Loss: 0.000071
+[Phase 1 - Expert Imitation] Iteration 3
+[Phase 1 - Expert Imitation] Iteration 4
+[DESIL with Refinement] Iteration 4, Episode Reward: -1818.34, Loss: 0.013808
+[Phase 2 - Self-Guided Refinement] Iteration 5
+  Trajectory length: 100, High confidence samples: 0
+[Phase 2 - Self-Guided Refinement] Iteration 6
+  Trajectory length: 100, High confidence samples: 0
+[DESIL with Refinement] Iteration 6, Episode Reward: -901.53, Loss: 0.000000
+[Phase 2 - Self-Guided Refinement] Iteration 7
+  Trajectory length: 100, High confidence samples: 0
+[Phase 2 - Self-Guided Refinement] Iteration 8
+  Trajectory length: 100, High confidence samples: 0
+[DESIL with Refinement] Iteration 8, Episode Reward: -1815.12, Loss: 0.000000
+[Phase 2 - Self-Guided Refinement] Iteration 9
+  Trajectory length: 100, High confidence samples: 0
+
+------------------------------------------------------------
+TRAINING DESIL WITHOUT REFINEMENT (EXPERT-ONLY)
+------------------------------------------------------------
+Training DESIL with expert demonstrations only (no self-guided refinement)...
+DESIL without Refinement - Expert-only training
+[DESIL without Refinement] Iteration 0, Episode Reward: -1384.95, Loss: 0.004625, Confidence: 0.497
+[DESIL without Refinement] Iteration 2, Episode Reward: -1734.17, Loss: 0.000894, Confidence: 0.434
+[DESIL without Refinement] Iteration 4, Episode Reward: -1161.65, Loss: 0.005354, Confidence: 0.440
+[DESIL without Refinement] Iteration 6, Episode Reward: -1071.79, Loss: 0.013559, Confidence: 0.468
+[DESIL without Refinement] Iteration 8, Episode Reward: -1049.00, Loss: 0.002402, Confidence: 0.493
+
+------------------------------------------------------------
+ABLATION STUDY RESULTS
+------------------------------------------------------------
+Full DESIL (with refinement) - Average reward: -1371.48 ± 381.85
+DESIL w/o refinement - Average reward: -1291.79 ± 263.50
+Refinement contribution: -6.2%
+Plot saved as .research/iteration1/images/reward_ablation.pdf
+Ablation study plot saved to: .research/iteration1/images/reward_ablation.pdf
+Experiment 2 complete.
+
+
+================================================================================
+EXPERIMENT 3: Evaluation of Computational Efficiency and Diffusion Loss Scaling
+================================================================================
+Using Pendulum-v1 environment (MuJoCo not available)
+Environment: Pendulum-v1
+State dimension: 3
+Action dimension: 1
+Device: cuda
+Evaluating computational efficiency of diffusion inference modes
+Policy parameters: 67073
+Diffusion parameters: 769
+
+------------------------------------------------------------
+PROFILING UNIFORM INFERENCE MODE
+------------------------------------------------------------
+Profiling diffusion inference (Uniform mode)
+Trials: 20, Confidence threshold: 0.8
+  Trial 0: confidence=0.486, time=0.216ms
+  Trial 5: confidence=0.492, time=0.159ms
+  Trial 10: confidence=0.523, time=0.157ms
+  Trial 15: confidence=0.470, time=0.157ms
+[Profiling] Average diffusion (Uniform) inference time per sample: 0.000164 seconds
+
+------------------------------------------------------------
+PROFILING SELECTIVE INFERENCE MODE
+------------------------------------------------------------
+Profiling diffusion inference (Selective mode)
+Trials: 20, Confidence threshold: 0.8
+  Trial 0: confidence=0.482, time=0.159ms
+  Trial 5: confidence=0.486, time=0.160ms
+  Trial 10: confidence=0.468, time=0.157ms
+  Trial 15: confidence=0.503, time=0.172ms
+High confidence samples: 0/20 (0.0%)
+[Profiling] Average diffusion (Selective) inference time per sample: 0.000162 seconds
+
+------------------------------------------------------------
+COMPUTATIONAL EFFICIENCY RESULTS
+------------------------------------------------------------
+Uniform inference time: 0.164 ms per sample
+Selective inference time: 0.162 ms per sample
+Speedup factor: 1.01x
+Bar chart saved as .research/iteration1/images/inference_latency.pdf
+Computational efficiency plot saved to: .research/iteration1/images/inference_latency.pdf
+Experiment 3 complete.
+
+
+================================================================================
+ALL EXPERIMENTS COMPLETED SUCCESSFULLY!
+================================================================================
+
+Experiment Summary:
+1. Performance Comparison: BC vs DESIL reward curves saved
+2. Ablation Study: Self-guided refinement analysis completed
+3. Computational Efficiency: Inference latency profiling evaluated
+
+All plots saved to: .research/iteration1/images
+- reward_comparison.pdf
+- reward_ablation.pdf
+- inference_latency.pdf
+
+Experiment status: stopped
