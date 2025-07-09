@@ -28,18 +28,42 @@ def experiment_performance_comparison(device):
     print(f"Environment: {env.spec.id}")
     print(f"State dimension: {state_dim}")
     print(f"Action dimension: {action_dim}")
+    print(f"Action space: {env.action_space}")
+    print(f"Observation space: {env.observation_space}")
     print(f"Device: {device}")
+    print(f"Training iterations: 10 (minimal for testing)")
     
+    print("\n" + "-"*60)
+    print("TRAINING BASELINE BC AGENT")
+    print("-"*60)
     bc_policy = PolicyNet(state_dim, action_dim).to(device)
     bc_optimizer = optim.Adam(bc_policy.parameters(), lr=7e-4)
-    print("Training Baseline BC Agent (minimal iterations)...")
+    print(f"BC Policy architecture: {bc_policy}")
+    print("Starting baseline behavioral cloning training...")
     bc_rewards = train_agent(env, bc_policy, bc_optimizer, use_diffusion=False, num_iterations=10)
     
+    print("\n" + "-"*60)
+    print("TRAINING DESIL AGENT")
+    print("-"*60)
     desil_policy = PolicyNet(state_dim, action_dim).to(device)
     desil_diffusion = DiffusionModel(state_dim, action_dim).to(device)
     desil_optimizer = optim.Adam(desil_policy.parameters(), lr=7e-4)
-    print("Training DESIL Agent (minimal iterations)...")
+    print(f"DESIL Policy architecture: {desil_policy}")
+    print(f"DESIL Diffusion architecture: {desil_diffusion}")
+    print("Starting DESIL training with diffusion confidence weighting...")
     desil_rewards = train_agent(env, desil_policy, desil_optimizer, diffusion=desil_diffusion, use_diffusion=True, num_iterations=10)
+    
+    print("\n" + "-"*60)
+    print("PERFORMANCE COMPARISON RESULTS")
+    print("-"*60)
+    bc_avg = np.mean(bc_rewards)
+    desil_avg = np.mean(desil_rewards)
+    bc_std = np.std(bc_rewards)
+    desil_std = np.std(desil_rewards)
+    
+    print(f"Baseline BC - Average reward: {bc_avg:.2f} ± {bc_std:.2f}")
+    print(f"DESIL Agent - Average reward: {desil_avg:.2f} ± {desil_std:.2f}")
+    print(f"Performance improvement: {((desil_avg - bc_avg) / abs(bc_avg) * 100):.1f}%")
     
     iterations = list(range(len(bc_rewards)))
     images_dir = ensure_images_directory()
@@ -47,6 +71,7 @@ def experiment_performance_comparison(device):
     plot_and_save(iterations, [bc_rewards, desil_rewards], ["Baseline BC", "DESIL"],
                   "Iterations", "Episode Reward", "Reward Comparison", filename)
     
+    print(f"Performance comparison plot saved to: {filename}")
     print("Experiment 1 complete.\n")
     env.close()
 
@@ -64,17 +89,38 @@ def experiment_ablation_study(device):
     print(f"State dimension: {state_dim}")
     print(f"Action dimension: {action_dim}")
     print(f"Device: {device}")
+    print("Ablation study: Comparing DESIL with vs without self-guided refinement")
     
+    print("\n" + "-"*60)
+    print("TRAINING FULL DESIL (WITH SELF-GUIDED REFINEMENT)")
+    print("-"*60)
     policy_full = PolicyNet(state_dim, action_dim).to(device)
     diffusion_full = DiffusionModel(state_dim, action_dim).to(device)
     optimizer_full = optim.Adam(policy_full.parameters(), lr=7e-4)
+    print("Training DESIL with dual-phase approach (expert + self-guided refinement)...")
     full_desil_rewards = train_desil_with_refinement(env, policy_full, optimizer_full, diffusion_full,
                                                      confidence_threshold=0.8, refine_phase_start=5, num_iterations=10)
     
+    print("\n" + "-"*60)
+    print("TRAINING DESIL WITHOUT REFINEMENT (EXPERT-ONLY)")
+    print("-"*60)
     policy_no_refine = PolicyNet(state_dim, action_dim).to(device)
     diffusion_no_refine = DiffusionModel(state_dim, action_dim).to(device)
     optimizer_no_refine = optim.Adam(policy_no_refine.parameters(), lr=7e-4)
+    print("Training DESIL with expert demonstrations only (no self-guided refinement)...")
     no_refine_rewards = train_desil_without_refinement(env, policy_no_refine, optimizer_no_refine, diffusion_no_refine, num_iterations=10)
+    
+    print("\n" + "-"*60)
+    print("ABLATION STUDY RESULTS")
+    print("-"*60)
+    full_avg = np.mean(full_desil_rewards)
+    no_refine_avg = np.mean(no_refine_rewards)
+    full_std = np.std(full_desil_rewards)
+    no_refine_std = np.std(no_refine_rewards)
+    
+    print(f"Full DESIL (with refinement) - Average reward: {full_avg:.2f} ± {full_std:.2f}")
+    print(f"DESIL w/o refinement - Average reward: {no_refine_avg:.2f} ± {no_refine_std:.2f}")
+    print(f"Refinement contribution: {((full_avg - no_refine_avg) / abs(no_refine_avg) * 100):.1f}%")
     
     iterations_ablation = list(range(len(full_desil_rewards)))
     images_dir = ensure_images_directory()
@@ -83,6 +129,7 @@ def experiment_ablation_study(device):
                   ["Full DESIL", "DESIL w/o Refinement"],
                   "Iterations", "Episode Reward", "Ablation: Reward Comparison", filename)
     
+    print(f"Ablation study plot saved to: {filename}")
     print("Experiment 2 complete.\n")
     env.close()
 
@@ -100,12 +147,31 @@ def experiment_computational_efficiency(device):
     print(f"State dimension: {state_dim}")
     print(f"Action dimension: {action_dim}")
     print(f"Device: {device}")
+    print("Evaluating computational efficiency of diffusion inference modes")
     
     policy = PolicyNet(state_dim, action_dim).to(device)
     diffusion = DiffusionModel(state_dim, action_dim).to(device)
     
+    print(f"Policy parameters: {sum(p.numel() for p in policy.parameters())}")
+    print(f"Diffusion parameters: {sum(p.numel() for p in diffusion.parameters())}")
+    
+    print("\n" + "-"*60)
+    print("PROFILING UNIFORM INFERENCE MODE")
+    print("-"*60)
     uniform_time = profile_diffusion_inference(env, policy, diffusion, use_selective=False, num_trials=20)
+    
+    print("\n" + "-"*60)
+    print("PROFILING SELECTIVE INFERENCE MODE")
+    print("-"*60)
     selective_time = profile_diffusion_inference(env, policy, diffusion, confidence_threshold=0.8, use_selective=True, num_trials=20)
+    
+    print("\n" + "-"*60)
+    print("COMPUTATIONAL EFFICIENCY RESULTS")
+    print("-"*60)
+    speedup = uniform_time / selective_time if selective_time > 0 else 1.0
+    print(f"Uniform inference time: {uniform_time*1000:.3f} ms per sample")
+    print(f"Selective inference time: {selective_time*1000:.3f} ms per sample")
+    print(f"Speedup factor: {speedup:.2f}x")
     
     modes = ["Uniform", "Selective"]
     times = [uniform_time, selective_time]
@@ -115,6 +181,7 @@ def experiment_computational_efficiency(device):
     save_bar_chart(modes, times, "Inference Mode", "Average Inference Time (seconds)", 
                    "Diffusion Inference Latency Comparison", filename)
     
+    print(f"Computational efficiency plot saved to: {filename}")
     print("Experiment 3 complete.\n")
     env.close()
 
