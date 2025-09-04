@@ -1,302 +1,85 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
+import torch.nn.functional as F
+import torchattacks
+from torchvision.models import resnet18
+from torch.nn import Sequential
 import numpy as np
 import time
 
-class PolicyNet(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(PolicyNet, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(state_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, action_dim)
-        )
-    def forward(self, x):
-        return self.fc(x)
+def get_classifier():
+    """
+    Load a ResNet-18 model for CIFAR-10 classification.
+    Note: In a real experiment you would load a properly pretrained classifier on CIFAR-10.
+    Here, for demonstration purposes, we use random weights.
+    """
+    classifier = resnet18(num_classes=10)
+    classifier.eval()
+    
+    for param in classifier.parameters():
+        param.requires_grad = False
+    
+    return classifier
 
-class DiffusionModel(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(DiffusionModel, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim + action_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1),
-            nn.Sigmoid()
-        )
-    def forward(self, state, action):
-        x = torch.cat([state, action], dim=1)
-        return self.net(x)
+def get_feature_extractor():
+    """
+    Use a pretrained ResNet-18 as a feature extractor: remove final fully-connected layer.
+    """
+    feature_extractor = resnet18(pretrained=True)
+    modules = list(feature_extractor.children())[:-1]
+    feature_extractor = Sequential(*modules)
+    feature_extractor.eval()
+    for param in feature_extractor.parameters():
+        param.requires_grad = False
+    return feature_extractor
 
-def train_agent(env, policy, optimizer, diffusion=None, use_diffusion=False, num_iterations=10):
+def purify_purifypp(image_adv):
     """
-    Trains a given policy with either standard behavior cloning (BC) 
-    or by incorporating diffusion confidence scores to weight the loss.
+    Purification using the baseline Purify++ method.
+    For demonstration we implement a dummy reverse diffusion that returns a slightly smoothed image.
+    In practice, this would run a reverse diffusion with fixed parameters.
     """
-    device = next(policy.parameters()).device
-    cumulative_rewards = []
-    total_steps = 0
-    
-    print(f"Training agent on device: {device}")
-    print(f"Policy parameters: {sum(p.numel() for p in policy.parameters())}")
-    if diffusion is not None:
-        print(f"Diffusion parameters: {sum(p.numel() for p in diffusion.parameters())}")
-    
-    for iter in range(num_iterations):
-        reset_result = env.reset()
-        if isinstance(reset_result, tuple):
-            state = reset_result[0]
-        else:
-            state = reset_result
-        done = False
-        episode_reward = 0.0
-        episode_steps = 0
-        episode_losses = []
-        
-        while not done:
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-            action_pred = policy(state_tensor)
-            action = action_pred.detach().cpu().numpy().flatten()
-            confidence = 1.0
-            if use_diffusion and (diffusion is not None):
-                with torch.no_grad():
-                    confidence = diffusion(state_tensor, action_pred).item()
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            episode_reward += reward
-            episode_steps += 1
+    with torch.no_grad():
+        purified = image_adv * 0.9 + torch.randn_like(image_adv) * 0.05
+    return purified
 
-            expert_action = action
-            expert_tensor = torch.FloatTensor(expert_action).unsqueeze(0).to(device)
-            loss = confidence * ((action_pred - expert_tensor)**2).mean()
-            episode_losses.append(loss.item())
-            
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+def purify_acdp(image_adv):
+    """
+    Purification using the proposed Adaptive Classifier-guided Diffusion Purification (ACDP).
+    For demonstration this placeholder uses a similar reverse diffusion but with a dynamic component.
+    """
+    with torch.no_grad():
+        scaling = torch.clamp(torch.abs(image_adv).mean(dim=[1,2,3], keepdim=True), 0.8, 1.2)
+        purified = image_adv * 0.92 + torch.randn_like(image_adv) * 0.05 * scaling
+    return purified
 
-            state = next_state
-        
-        total_steps += episode_steps
-        avg_loss = np.mean(episode_losses) if episode_losses else 0.0
-        cumulative_rewards.append(episode_reward)
-        
-        if iter % 2 == 0:
-            print(f"[Training] Iteration {iter}/{num_iterations-1}, Episode Reward: {episode_reward:.2f}, "
-                  f"Steps: {episode_steps}, Avg Loss: {avg_loss:.6f}, Confidence: {confidence:.3f}")
-    
-    print(f"Training completed. Total steps: {total_steps}, Avg reward: {np.mean(cumulative_rewards):.2f}")
-    return cumulative_rewards
-
-def generate_trajectory(env, policy, max_steps=100):
+def adaptive_purification_with_logging(image_adv, classifier, num_steps=50):
     """
-    Generates a trajectory (list of state-action pairs) from the current policy.
+    This function implements a dummy adaptive purification routine that logs the evolution
+    of the guidance weight (λ), noise scaling, and classifier confidence over 'num_steps' steps.
     """
-    device = next(policy.parameters()).device
-    reset_result = env.reset()
-    if isinstance(reset_result, tuple):
-        state = reset_result[0]
-    else:
-        state = reset_result
-    traj = []
-    for _ in range(max_steps):
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-        action = policy(state_tensor).detach().cpu().numpy().flatten()
-        traj.append((state, action))
-        state, _, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
-        if done:
-            break
-    return traj
-
-def train_desil_with_refinement(env, policy, optimizer, diffusion, 
-                                 confidence_threshold=0.8, 
-                                 refine_phase_start=5, num_iterations=10):
-    """
-    Trains the DESIL agent with a two-phase strategy:
-      Phase 1: Imitation only using (simulated) expert data.
-      Phase 2: Self-guided refinement where agent-generated trajectories are fused.
-    """
-    device = next(policy.parameters()).device
-    cumulative_rewards = []
-    expert_data = []
+    guidance_log = []
+    noise_log = []
+    confidence_log = []
     
-    print(f"DESIL with Refinement - Phase transition at iteration {refine_phase_start}")
-    print(f"Confidence threshold: {confidence_threshold}")
+    purified = image_adv.clone()
     
-    for _ in range(5):
-        reset_result = env.reset()
-        if isinstance(reset_result, tuple):
-            s = reset_result[0]
-        else:
-            s = reset_result
-        a = np.zeros(env.action_space.shape)
-        expert_data.append((s, a))
-    
-    for iter in range(num_iterations):
-        if iter < refine_phase_start:
-            print(f"[Phase 1 - Expert Imitation] Iteration {iter}")
-            s, expert_action = expert_data[iter % len(expert_data)]
-            state_tensor = torch.FloatTensor(s).unsqueeze(0).to(device)
-            action_pred = policy(state_tensor)
-            with torch.no_grad():
-                confidence = diffusion(state_tensor, action_pred).item()
-            expert_tensor = torch.FloatTensor(expert_action).unsqueeze(0).to(device)
-            loss = confidence * ((action_pred - expert_tensor)**2).mean()
-        else:
-            print(f"[Phase 2 - Self-Guided Refinement] Iteration {iter}")
-            traj = generate_trajectory(env, policy)
-            losses = []
-            high_conf_count = 0
-            for (s, a_real) in traj:
-                state_tensor = torch.FloatTensor(s).unsqueeze(0).to(device)
-                action_tensor = policy(state_tensor)
-                with torch.no_grad():
-                    conf = diffusion(state_tensor, action_tensor).item()
-                if conf >= confidence_threshold:
-                    high_conf_count += 1
-                    real_tensor = torch.FloatTensor(a_real).unsqueeze(0).to(device)
-                    loss_component = conf * ((action_tensor - real_tensor)**2).mean()
-                    losses.append(loss_component)
-            
-            print(f"  Trajectory length: {len(traj)}, High confidence samples: {high_conf_count}")
-            
-            if losses:
-                loss = sum(losses) / len(losses)
-            else:
-                dummy_param = next(policy.parameters())
-                loss = torch.tensor(0.0, requires_grad=True, device=device)
-        
-        if hasattr(loss, 'backward'):
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-        else:
-            print(f"Warning: Loss is not a tensor, skipping backward pass. Loss type: {type(loss)}")
-        
-        reset_result = env.reset()
-        if isinstance(reset_result, tuple):
-            state_eval = reset_result[0]
-        else:
-            state_eval = reset_result
-        done = False
-        ep_reward = 0.0
-        while not done:
-            state_tensor = torch.FloatTensor(state_eval).unsqueeze(0).to(device)
-            action = policy(state_tensor).detach().cpu().numpy().flatten()
-            state_eval, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            ep_reward += reward
-        cumulative_rewards.append(ep_reward)
-        if iter % 2 == 0:
-            try:
-                if hasattr(loss, 'item'):
-                    loss_val = loss.item()
-                else:
-                    loss_val = float(loss)
-            except:
-                loss_val = 0.0
-            print(f"[DESIL with Refinement] Iteration {iter}, Episode Reward: {ep_reward:.2f}, Loss: {loss_val:.6f}")
-    return cumulative_rewards
-
-def train_desil_without_refinement(env, policy, optimizer, diffusion, num_iterations=10):
-    """
-    Trains the DESIL variant without the self-guided refinement loop.
-    It only uses the expert demonstration data weighted by the diffusion model.
-    """
-    device = next(policy.parameters()).device
-    cumulative_rewards = []
-    expert_data = []
-    
-    print("DESIL without Refinement - Expert-only training")
-    
-    for _ in range(5):
-        reset_result = env.reset()
-        if isinstance(reset_result, tuple):
-            s = reset_result[0]
-        else:
-            s = reset_result
-        a = np.zeros(env.action_space.shape)
-        expert_data.append((s, a))
-    
-    for iter in range(num_iterations):
-        s, expert_action = expert_data[iter % len(expert_data)]
-        state_tensor = torch.FloatTensor(s).unsqueeze(0).to(device)
-        action_pred = policy(state_tensor)
+    for step in range(num_steps):
         with torch.no_grad():
-            confidence = diffusion(state_tensor, action_pred).item()
-        expert_tensor = torch.FloatTensor(expert_action).unsqueeze(0).to(device)
-        loss = confidence * ((action_pred - expert_tensor)**2).mean()
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        reset_result = env.reset()
-        if isinstance(reset_result, tuple):
-            state_eval = reset_result[0]
-        else:
-            state_eval = reset_result
-        done = False
-        ep_reward = 0.0
-        while not done:
-            state_tensor = torch.FloatTensor(state_eval).unsqueeze(0).to(device)
-            action = policy(state_tensor).detach().cpu().numpy().flatten()
-            state_eval, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            ep_reward += reward
-        cumulative_rewards.append(ep_reward)
-        if iter % 2 == 0:
-            print(f"[DESIL without Refinement] Iteration {iter}, Episode Reward: {ep_reward:.2f}, "
-                  f"Loss: {loss.item():.6f}, Confidence: {confidence:.3f}")
-    return cumulative_rewards
-
-def profile_diffusion_inference(env, policy, diffusion, confidence_threshold=0.8, 
-                                use_selective=True, num_trials=20):
-    """
-    Profiles the inference time for the diffusion model.
-    If use_selective==True, then only the cost for trajectories with confidence above threshold is counted.
-    Otherwise, the diffusion model is run uniformly on all samples.
-    Returns the average inference time per sample.
-    """
-    device = next(policy.parameters()).device
-    total_time = 0.0
-    count = 0
-    high_conf_count = 0
-    
-    print(f"Profiling diffusion inference ({'Selective' if use_selective else 'Uniform'} mode)")
-    print(f"Trials: {num_trials}, Confidence threshold: {confidence_threshold}")
-    
-    for trial in range(num_trials):
-        reset_result = env.reset()
-        if isinstance(reset_result, tuple):
-            state = reset_result[0]
-        else:
-            state = reset_result
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-        action = policy(state_tensor)
-        start_time = time.time()
-        with torch.no_grad():
-            conf = diffusion(state_tensor, action).item()
-            if use_selective:
-                if conf >= confidence_threshold:
-                    high_conf_count += 1
-                    dummy = conf * 2.0
-            else:
-                dummy = conf * 2.0
-        elapsed = time.time() - start_time
-        total_time += elapsed
-        count += 1
-        
-        if trial % 5 == 0:
-            print(f"  Trial {trial}: confidence={conf:.3f}, time={elapsed*1000:.3f}ms")
-    
-    avg_time = total_time / count
-    mode = "Selective" if use_selective else "Uniform"
-    
-    if use_selective:
-        print(f"High confidence samples: {high_conf_count}/{num_trials} ({100*high_conf_count/num_trials:.1f}%)")
-    
-    print(f"[Profiling] Average diffusion ({mode}) inference time per sample: {avg_time:.6f} seconds")
-    return avg_time
+            outputs = classifier(purified)
+            probs = F.softmax(outputs, dim=1)
+            confidences = probs.max(dim=1).values
+            
+            lambda_val = torch.where(confidences < 0.7, torch.tensor(1.0, device=purified.device),
+                                     torch.tensor(0.5, device=purified.device))
+            noise_sigma = lambda_val * 0.1
+            
+            guidance_log.append(lambda_val.mean().item())
+            noise_log.append(noise_sigma.mean().item())
+            confidence_log.append(confidences.mean().item())
+            
+            lambda_tensor = lambda_val.view(-1,1,1,1)
+            noise = torch.randn_like(purified) * noise_sigma.view(-1,1,1,1)
+            purified = purified - lambda_tensor * (purified - image_adv) + noise
+            
+    return purified, guidance_log, noise_log, confidence_log

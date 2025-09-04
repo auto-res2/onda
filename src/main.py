@@ -1,195 +1,216 @@
 import torch
-import torch.optim as optim
+import torch.nn.functional as F
+import torchattacks
+from torchvision.models import resnet18
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 import warnings
 import os
 import sys
 
 from preprocess import get_environment, generate_expert_data, get_device, set_random_seeds
 from train import (
-    PolicyNet, DiffusionModel, train_agent, train_desil_with_refinement,
-    train_desil_without_refinement, profile_diffusion_inference
+    get_classifier, get_feature_extractor, purify_purifypp, purify_acdp,
+    adaptive_purification_with_logging
 )
-from evaluate import plot_and_save, save_bar_chart, ensure_images_directory
+from evaluate import (
+    save_bar_chart, save_tsne_plot, save_adaptive_parameters_plot,
+    extract_features, compute_cosine_similarity, ensure_images_directory
+)
 
 warnings.filterwarnings("ignore")
 
-def experiment_performance_comparison(device):
-    """Experiment 1: Performance Comparison in a Continuous Control Task"""
+def experiment_adversarial_purification_benchmarking(device):
+    """Experiment 1: Adversarial Purification Benchmarking"""
     print("\n" + "="*80)
-    print("EXPERIMENT 1: Performance Comparison in a Continuous Control Task")
+    print("EXPERIMENT 1: Adversarial Purification Benchmarking")
     print("="*80)
     
-    env = get_environment()
-    state_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
+    test_loader = get_environment()
+    classifier = get_classifier().to(device)
     
-    print(f"Environment: {env.spec.id}")
-    print(f"State dimension: {state_dim}")
-    print(f"Action dimension: {action_dim}")
-    print(f"Action space: {env.action_space}")
-    print(f"Observation space: {env.observation_space}")
+    print(f"Dataset: CIFAR-10 test set")
+    print(f"Classifier: ResNet-18")
     print(f"Device: {device}")
-    print(f"Training iterations: 10 (minimal for testing)")
+    print(f"Attack: FGSM with eps=0.05")
+    
+    attack = torchattacks.FGSM(classifier, eps=0.05)
+    
+    batch_idx, (images, labels) = next(enumerate(test_loader))
+    images, labels = images.to(device), labels.to(device)
+    
+    print(f"Batch size: {images.size(0)}")
+    print(f"Image shape: {images.shape}")
     
     print("\n" + "-"*60)
-    print("TRAINING BASELINE BC AGENT")
+    print("GENERATING ADVERSARIAL EXAMPLES")
     print("-"*60)
-    bc_policy = PolicyNet(state_dim, action_dim).to(device)
-    bc_optimizer = optim.Adam(bc_policy.parameters(), lr=7e-4)
-    print(f"BC Policy architecture: {bc_policy}")
-    print("Starting baseline behavioral cloning training...")
-    bc_rewards = train_agent(env, bc_policy, bc_optimizer, use_diffusion=False, num_iterations=10)
+    images_adv = attack(images, labels)
+    print("Adversarial examples generated using FGSM")
     
     print("\n" + "-"*60)
-    print("TRAINING DESIL AGENT")
+    print("PURIFYING WITH PURIFY++")
     print("-"*60)
-    desil_policy = PolicyNet(state_dim, action_dim).to(device)
-    desil_diffusion = DiffusionModel(state_dim, action_dim).to(device)
-    desil_optimizer = optim.Adam(desil_policy.parameters(), lr=7e-4)
-    print(f"DESIL Policy architecture: {desil_policy}")
-    print(f"DESIL Diffusion architecture: {desil_diffusion}")
-    print("Starting DESIL training with diffusion confidence weighting...")
-    desil_rewards = train_agent(env, desil_policy, desil_optimizer, diffusion=desil_diffusion, use_diffusion=True, num_iterations=10)
+    purified_pp = purify_purifypp(images_adv)
+    print("Purification completed using Purify++ method")
     
     print("\n" + "-"*60)
-    print("PERFORMANCE COMPARISON RESULTS")
+    print("PURIFYING WITH ACDP")
     print("-"*60)
-    bc_avg = np.mean(bc_rewards)
-    desil_avg = np.mean(desil_rewards)
-    bc_std = np.std(bc_rewards)
-    desil_std = np.std(desil_rewards)
+    purified_acdp = purify_acdp(images_adv)
+    print("Purification completed using ACDP method")
     
-    print(f"Baseline BC - Average reward: {bc_avg:.2f} ± {bc_std:.2f}")
-    print(f"DESIL Agent - Average reward: {desil_avg:.2f} ± {desil_std:.2f}")
-    print(f"Performance improvement: {((desil_avg - bc_avg) / abs(bc_avg) * 100):.1f}%")
+    print("\n" + "-"*60)
+    print("EVALUATING CLASSIFICATION ACCURACY")
+    print("-"*60)
+    with torch.no_grad():
+        preds_pp = classifier(purified_pp).argmax(dim=1)
+        preds_acdp = classifier(purified_acdp).argmax(dim=1)
+        
+    acc_pp = (preds_pp == labels).float().mean().item()
+    acc_acdp = (preds_acdp == labels).float().mean().item()
     
-    iterations = list(range(len(bc_rewards)))
+    print(f"Purify++ Accuracy: {acc_pp:.3f}")
+    print(f"ACDP Accuracy: {acc_acdp:.3f}")
+    if acc_pp > 0:
+        print(f"Improvement: {((acc_acdp - acc_pp) / acc_pp * 100):.1f}%")
+    else:
+        print(f"Improvement: N/A (baseline accuracy is zero)")
+    
+    methods = ['Purify++', 'ACDP']
+    accuracies = [acc_pp, acc_acdp]
+    
     images_dir = ensure_images_directory()
-    filename = os.path.join(images_dir, "reward_comparison.pdf")
-    plot_and_save(iterations, [bc_rewards, desil_rewards], ["Baseline BC", "DESIL"],
-                  "Iterations", "Episode Reward", "Reward Comparison", filename)
+    filename = os.path.join(images_dir, "adversarial_accuracy.pdf")
+    save_bar_chart(methods, accuracies, "Purification Method", "Classification Accuracy",
+                   "Adversarial Purification Accuracy Comparison", filename)
     
-    print(f"Performance comparison plot saved to: {filename}")
+    print(f"Accuracy comparison plot saved to: {filename}")
     print("Experiment 1 complete.\n")
-    env.close()
 
-def experiment_ablation_study(device):
-    """Experiment 2: Ablation Study on the Self-Guided Refinement Loop"""
+def experiment_feature_preservation_evaluation(device):
+    """Experiment 2: Evaluating Feature Preservation"""
     print("\n" + "="*80)
-    print("EXPERIMENT 2: Ablation Study on the Self-Guided Refinement Loop")
+    print("EXPERIMENT 2: Evaluating Feature Preservation")
     print("="*80)
     
-    env = get_environment()
-    state_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
+    test_loader = get_environment()
+    classifier = get_classifier().to(device)
+    feature_extractor = get_feature_extractor().to(device)
     
-    print(f"Environment: {env.spec.id}")
-    print(f"State dimension: {state_dim}")
-    print(f"Action dimension: {action_dim}")
+    print(f"Dataset: CIFAR-10 test set")
+    print(f"Feature extractor: Pretrained ResNet-18")
     print(f"Device: {device}")
-    print("Ablation study: Comparing DESIL with vs without self-guided refinement")
+    
+    attack = torchattacks.FGSM(classifier, eps=0.05)
+    
+    images, _ = next(iter(test_loader))
+    images = images.to(device)
+    
+    print(f"Batch size: {images.size(0)}")
     
     print("\n" + "-"*60)
-    print("TRAINING FULL DESIL (WITH SELF-GUIDED REFINEMENT)")
+    print("GENERATING ADVERSARIAL EXAMPLES")
     print("-"*60)
-    policy_full = PolicyNet(state_dim, action_dim).to(device)
-    diffusion_full = DiffusionModel(state_dim, action_dim).to(device)
-    optimizer_full = optim.Adam(policy_full.parameters(), lr=7e-4)
-    print("Training DESIL with dual-phase approach (expert + self-guided refinement)...")
-    full_desil_rewards = train_desil_with_refinement(env, policy_full, optimizer_full, diffusion_full,
-                                                     confidence_threshold=0.8, refine_phase_start=5, num_iterations=10)
+    images_adv = attack(images, torch.zeros(images.size(0), dtype=torch.long, device=device))
+    print("Adversarial examples generated")
     
     print("\n" + "-"*60)
-    print("TRAINING DESIL WITHOUT REFINEMENT (EXPERT-ONLY)")
+    print("PURIFYING IMAGES")
     print("-"*60)
-    policy_no_refine = PolicyNet(state_dim, action_dim).to(device)
-    diffusion_no_refine = DiffusionModel(state_dim, action_dim).to(device)
-    optimizer_no_refine = optim.Adam(policy_no_refine.parameters(), lr=7e-4)
-    print("Training DESIL with expert demonstrations only (no self-guided refinement)...")
-    no_refine_rewards = train_desil_without_refinement(env, policy_no_refine, optimizer_no_refine, diffusion_no_refine, num_iterations=10)
+    purified_pp = purify_purifypp(images_adv)
+    purified_acdp = purify_acdp(images_adv)
+    print("Images purified using both methods")
     
     print("\n" + "-"*60)
-    print("ABLATION STUDY RESULTS")
+    print("EXTRACTING FEATURES")
     print("-"*60)
-    full_avg = np.mean(full_desil_rewards)
-    no_refine_avg = np.mean(no_refine_rewards)
-    full_std = np.std(full_desil_rewards)
-    no_refine_std = np.std(no_refine_rewards)
+    features_clean = extract_features(feature_extractor, images)
+    features_pp = extract_features(feature_extractor, purified_pp)
+    features_acdp = extract_features(feature_extractor, purified_acdp)
+    print(f"Features extracted - Shape: {features_clean.shape}")
     
-    print(f"Full DESIL (with refinement) - Average reward: {full_avg:.2f} ± {full_std:.2f}")
-    print(f"DESIL w/o refinement - Average reward: {no_refine_avg:.2f} ± {no_refine_std:.2f}")
-    print(f"Refinement contribution: {((full_avg - no_refine_avg) / abs(no_refine_avg) * 100):.1f}%")
+    print("\n" + "-"*60)
+    print("COMPUTING COSINE SIMILARITIES")
+    print("-"*60)
+    sim_pp = compute_cosine_similarity(features_clean, features_pp)
+    sim_acdp = compute_cosine_similarity(features_clean, features_acdp)
     
-    iterations_ablation = list(range(len(full_desil_rewards)))
+    print(f"Purify++ Average Feature Cosine Similarity: {sim_pp:.4f}")
+    print(f"ACDP Average Feature Cosine Similarity: {sim_acdp:.4f}")
+    if sim_pp > 0:
+        print(f"ACDP improvement: {((sim_acdp - sim_pp) / sim_pp * 100):.1f}%")
+    else:
+        print(f"ACDP improvement: N/A (baseline similarity is zero)")
+    
+    print("\n" + "-"*60)
+    print("GENERATING T-SNE VISUALIZATION")
+    print("-"*60)
+    features_combined = np.concatenate([features_clean, features_pp, features_acdp], axis=0)
+    labels_vis = np.concatenate([np.zeros(len(features_clean)), 
+                                 np.ones(len(features_pp)), 
+                                 2*np.ones(len(features_acdp))]).astype(int)
+    
     images_dir = ensure_images_directory()
-    filename = os.path.join(images_dir, "reward_ablation.pdf")
-    plot_and_save(iterations_ablation, [full_desil_rewards, no_refine_rewards],
-                  ["Full DESIL", "DESIL w/o Refinement"],
-                  "Iterations", "Episode Reward", "Ablation: Reward Comparison", filename)
+    filename = os.path.join(images_dir, "tsne_feature_preservation.pdf")
+    save_tsne_plot(features_combined, labels_vis, filename)
     
-    print(f"Ablation study plot saved to: {filename}")
     print("Experiment 2 complete.\n")
-    env.close()
 
-def experiment_computational_efficiency(device):
-    """Experiment 3: Evaluation of Computational Efficiency and Diffusion Loss Scaling"""
+def experiment_adaptive_guidance_analysis(device):
+    """Experiment 3: Impact Analysis of Adaptive Guidance and Randomness Control"""
     print("\n" + "="*80)
-    print("EXPERIMENT 3: Evaluation of Computational Efficiency and Diffusion Loss Scaling")
+    print("EXPERIMENT 3: Impact Analysis of Adaptive Guidance and Randomness Control")
     print("="*80)
     
-    env = get_environment()
-    state_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
+    test_loader = get_environment()
+    classifier = get_classifier().to(device)
     
-    print(f"Environment: {env.spec.id}")
-    print(f"State dimension: {state_dim}")
-    print(f"Action dimension: {action_dim}")
+    print(f"Dataset: CIFAR-10 test set")
+    print(f"Classifier: ResNet-18")
     print(f"Device: {device}")
-    print("Evaluating computational efficiency of diffusion inference modes")
+    print(f"Adaptive purification steps: 50")
     
-    policy = PolicyNet(state_dim, action_dim).to(device)
-    diffusion = DiffusionModel(state_dim, action_dim).to(device)
+    attack = torchattacks.FGSM(classifier, eps=0.05)
     
-    print(f"Policy parameters: {sum(p.numel() for p in policy.parameters())}")
-    print(f"Diffusion parameters: {sum(p.numel() for p in diffusion.parameters())}")
+    images_batch, _ = next(iter(test_loader))
+    images_batch = images_batch.to(device)
     
-    print("\n" + "-"*60)
-    print("PROFILING UNIFORM INFERENCE MODE")
-    print("-"*60)
-    uniform_time = profile_diffusion_inference(env, policy, diffusion, use_selective=False, num_trials=20)
+    print(f"Batch size: {images_batch.size(0)}")
     
     print("\n" + "-"*60)
-    print("PROFILING SELECTIVE INFERENCE MODE")
+    print("GENERATING ADVERSARIAL EXAMPLES")
     print("-"*60)
-    selective_time = profile_diffusion_inference(env, policy, diffusion, confidence_threshold=0.8, use_selective=True, num_trials=20)
+    images_adv = attack(images_batch, torch.zeros(images_batch.size(0), dtype=torch.long, device=device))
+    print("Adversarial examples generated")
     
     print("\n" + "-"*60)
-    print("COMPUTATIONAL EFFICIENCY RESULTS")
+    print("RUNNING ADAPTIVE PURIFICATION WITH LOGGING")
     print("-"*60)
-    speedup = uniform_time / selective_time if selective_time > 0 else 1.0
-    print(f"Uniform inference time: {uniform_time*1000:.3f} ms per sample")
-    print(f"Selective inference time: {selective_time*1000:.3f} ms per sample")
-    print(f"Speedup factor: {speedup:.2f}x")
+    purified_adaptive, lambda_log, noise_log, conf_log = adaptive_purification_with_logging(
+        images_adv, classifier, num_steps=50)
     
-    modes = ["Uniform", "Selective"]
-    times = [uniform_time, selective_time]
+    print("Adaptive purification completed with parameter logging")
+    print(f"Initial confidence: {conf_log[0]:.3f}")
+    print(f"Final confidence: {conf_log[-1]:.3f}")
+    print(f"Average guidance weight: {np.mean(lambda_log):.3f}")
+    print(f"Average noise scaling: {np.mean(noise_log):.3f}")
     
+    print("\n" + "-"*60)
+    print("SAVING ADAPTIVE PARAMETER PLOTS")
+    print("-"*60)
     images_dir = ensure_images_directory()
-    filename = os.path.join(images_dir, "inference_latency.pdf")
-    save_bar_chart(modes, times, "Inference Mode", "Average Inference Time (seconds)", 
-                   "Diffusion Inference Latency Comparison", filename)
+    filename = os.path.join(images_dir, "adaptive_parameters.pdf")
+    save_adaptive_parameters_plot(lambda_log, noise_log, conf_log, filename)
     
-    print(f"Computational efficiency plot saved to: {filename}")
     print("Experiment 3 complete.\n")
-    env.close()
 
 def main():
     """Main experiment orchestrator"""
     print("="*80)
-    print("DESIL EXPERIMENT SUITE")
-    print("Diffusion-Enhanced Self-Guided Imitation Learning Implementation")
+    print("ACDP EXPERIMENT SUITE")
+    print("Adaptive Classifier-Diffusion Purification Implementation")
     print("="*80)
     
     set_random_seeds(42)
@@ -198,24 +219,24 @@ def main():
     try:
         print("\nStarting experimental evaluation...")
         
-        experiment_performance_comparison(device)
-        experiment_ablation_study(device)
-        experiment_computational_efficiency(device)
+        experiment_adversarial_purification_benchmarking(device)
+        experiment_feature_preservation_evaluation(device)
+        experiment_adaptive_guidance_analysis(device)
         
         print("\n" + "="*80)
         print("ALL EXPERIMENTS COMPLETED SUCCESSFULLY!")
         print("="*80)
         
         print("\nExperiment Summary:")
-        print("1. Performance Comparison: BC vs DESIL reward curves saved")
-        print("2. Ablation Study: Self-guided refinement analysis completed")
-        print("3. Computational Efficiency: Inference latency profiling evaluated")
+        print("1. Adversarial Purification: Purify++ vs ACDP accuracy comparison")
+        print("2. Feature Preservation: Cosine similarity and t-SNE analysis")
+        print("3. Adaptive Guidance: Parameter evolution during purification")
         
         images_dir = ensure_images_directory()
         print(f"\nAll plots saved to: {images_dir}")
-        print("- reward_comparison.pdf")
-        print("- reward_ablation.pdf") 
-        print("- inference_latency.pdf")
+        print("- adversarial_accuracy.pdf")
+        print("- tsne_feature_preservation.pdf") 
+        print("- adaptive_parameters.pdf")
         
         status_enum = "stopped"
         print(f"\nExperiment status: {status_enum}")
