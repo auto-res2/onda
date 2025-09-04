@@ -109,7 +109,7 @@ def ensure_images_directory():
     """Ensure the images directory exists"""
     images_dir = ".research/iteration1/images"
     if not os.path.exists(images_dir):
-        os.makedirs(images_dir)
+        os.makedirs(images_dir, exist_ok=True)
     return images_dir
 
 def plot_loss_curve(loss_history, title, filename):

@@ -1,219 +1,79 @@
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim
-import torchattacks
-from torchvision.models import resnet18
-from torch.nn import Sequential
-import numpy as np
-import time
+import torchvision.models as vmodels
 
-def get_classifier():
-    """
-    Load a ResNet-18 model for CIFAR-10 classification.
-    Note: In a real experiment you would load a properly pretrained classifier on CIFAR-10.
-    Here, for demonstration purposes, we use random weights.
-    """
-    classifier = resnet18(num_classes=10)
-    classifier.eval()
-    
-    for param in classifier.parameters():
-        param.requires_grad = False
-    
-    return classifier
+def latent_encode(x):
+    """Simulated latent encoding: simply reduce spatial resolution by average pooling"""
+    pool = nn.AvgPool2d(kernel_size=2)
+    z = pool(x)
+    return z
 
-def get_feature_extractor():
-    """
-    Use a pretrained ResNet-18 as a feature extractor: remove final fully-connected layer.
-    """
-    feature_extractor = resnet18(pretrained=True)
-    modules = list(feature_extractor.children())[:-1]
-    feature_extractor = Sequential(*modules)
-    feature_extractor.eval()
-    for param in feature_extractor.parameters():
-        param.requires_grad = False
-    return feature_extractor
+def bayesian_flow_refine(z):
+    """Simulated Bayesian refinement: add slight noise correction in latent space"""
+    noise = torch.randn_like(z) * 0.01
+    z_refined = z + noise
+    return z_refined
 
-def purify_purifypp(image_adv):
-    """
-    Purification using the baseline Purify++ method.
-    For demonstration we implement a dummy reverse diffusion that returns a slightly smoothed image.
-    In practice, this would run a reverse diffusion with fixed parameters.
-    """
-    with torch.no_grad():
-        purified = image_adv * 0.9 + torch.randn_like(image_adv) * 0.05
-    return purified
+def reverse_diffuse(z, steps=10):
+    """Simulated reverse diffusion using a dummy iterative update.
+       Here we simply add a small correction per step."""
+    z_current = z
+    for step in range(steps):
+        z_current = z_current - 0.005 * (z_current)
+    return z_current
 
-def purify_acdp(image_adv):
-    """
-    Purification using the proposed Adaptive Classifier-guided Diffusion Purification (ACDP).
-    For demonstration this placeholder uses a similar reverse diffusion but with a dynamic component.
-    """
-    with torch.no_grad():
-        scaling = torch.clamp(torch.abs(image_adv).mean(dim=[1,2,3], keepdim=True), 0.8, 1.2)
-        purified = image_adv * 0.92 + torch.randn_like(image_adv) * 0.05 * scaling
-    return purified
+def decode_latent(z):
+    """Simulated decoding: upsample back to original size"""
+    upsample = nn.Upsample(scale_factor=2, mode='nearest')
+    x_reconstructed = upsample(z)
+    return torch.clamp(x_reconstructed, 0, 1)
 
-def adaptive_purification_with_logging(image_adv, classifier, num_steps=50):
-    """
-    This function implements a dummy adaptive purification routine that logs the evolution
-    of the guidance weight (λ), noise scaling, and classifier confidence over 'num_steps' steps.
-    """
-    guidance_log = []
-    noise_log = []
-    confidence_log = []
-    
-    purified = image_adv.clone()
-    
-    for step in range(num_steps):
-        with torch.no_grad():
-            outputs = classifier(purified)
-            probs = F.softmax(outputs, dim=1)
-            confidences = probs.max(dim=1).values
-            
-            lambda_val = torch.where(confidences < 0.7, torch.tensor(1.0, device=purified.device),
-                                     torch.tensor(0.5, device=purified.device))
-            noise_sigma = lambda_val * 0.1
-            
-            guidance_log.append(lambda_val.mean().item())
-            noise_log.append(noise_sigma.mean().item())
-            confidence_log.append(confidences.mean().item())
-            
-            lambda_tensor = lambda_val.view(-1,1,1,1)
-            noise = torch.randn_like(purified) * noise_sigma.view(-1,1,1,1)
-            purified = purified - lambda_tensor * (purified - image_adv) + noise
-            
-    return purified, guidance_log, noise_log, confidence_log
+def pixel_reverse_diffuse(x, steps=10):
+    """Simulated full pixel-space diffusion (Purify++ baseline): perform a slower iterative update"""
+    x_current = x
+    for step in range(steps):
+        x_current = x_current - 0.003 * (x_current)
+        time.sleep(0.001)
+    return torch.clamp(x_current, 0, 1)
 
-class DummyBackbone(nn.Module):
-    def __init__(self, in_channels=3, out_channels=64):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.act = nn.ReLU(inplace=True)
+def run_bfcp_pipeline(model, input_data, diffusion_steps=10):
+    t0 = time.time()
+    z = latent_encode(input_data)
+    t1 = time.time()
+    z_refined = bayesian_flow_refine(z)
+    t2 = time.time()
+    z_purified = reverse_diffuse(z_refined, steps=diffusion_steps)
+    t3 = time.time()
+    x_reconstructed = decode_latent(z_purified)
+    t4 = time.time()
+    timing = {
+        'latent_encoding': t1 - t0,
+        'bayesian_refinement': t2 - t1,
+        'reverse_diffusion': t3 - t2,
+        'decoding': t4 - t3,
+        'total': t4 - t0
+    }
+    return x_reconstructed, timing
+
+def run_purify_pp_pipeline(model, input_data, diffusion_steps=10):
+    t0 = time.time()
+    output = pixel_reverse_diffuse(input_data, steps=diffusion_steps)
+    t1 = time.time()
+    timing = {'total': t1 - t0}
+    return output, timing
+
+class DummyEncoder(nn.Module):
+    def __init__(self):
+        super(DummyEncoder, self).__init__()
+        self.conv = nn.Conv2d(3, 16, kernel_size=3, padding=1)
     def forward(self, x):
-        return self.act(self.conv(x))
+        return F.relu(self.conv(x))
 
-class DummyDecoder(nn.Module):
-    def __init__(self, in_channels=64, out_channels=3):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-    def forward(self, latent):
-        return torch.sigmoid(self.conv(latent))
-
-class FiTBaseline(nn.Module):
-    def __init__(self, in_channels=3, hidden_size=64):
-        super().__init__()
-        self.backbone = DummyBackbone(in_channels, hidden_size)
-        self.decoder = DummyDecoder(hidden_size, in_channels)
-    def forward(self, x, target_resolution=None):
-        latent = self.backbone(x)
-        if target_resolution is not None:
-            latent = F.interpolate(latent, size=target_resolution, mode='bicubic', align_corners=False)
-        return self.decoder(latent)
-
-class TrainableUpsampler(nn.Module):
-    def __init__(self, in_channels, up_factor=2):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels * (up_factor ** 2), 3, padding=1),
-            nn.PixelShuffle(up_factor),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels, in_channels, 3, padding=1),
-        )
-    def forward(self, x): 
-        return self.net(x)
-
-class TRExFiT(nn.Module):
-    def __init__(self, in_channels=3, hidden_size=64):
-        super().__init__()
-        self.backbone = DummyBackbone(in_channels, hidden_size)
-        self.trainable_upsampler = TrainableUpsampler(hidden_size, up_factor=2)
-        self.decoder = DummyDecoder(hidden_size, in_channels)
-    def forward(self, x, target_resolution=None):
-        latent = self.backbone(x)
-        if target_resolution is not None:
-            latent = self.trainable_upsampler(latent)
-            h, w = latent.shape[2:]
-            H, W = target_resolution
-            if (h, w) != (H, W):
-                latent = F.interpolate(latent, size=target_resolution, mode='bicubic', align_corners=False)
-        return self.decoder(latent)
-
-def multi_scale_loss(latent_original, latent_scaled):
-    B, C, H, W = latent_original.shape
-    if latent_scaled.shape != latent_original.shape:
-        latent_scaled = F.interpolate(latent_scaled, size=(H, W), mode='bilinear', align_corners=False)
-    
-    lo = latent_original.view(B, C, -1)
-    ls = latent_scaled.view(B, C, -1)
-    lo = lo / (lo.norm(dim=1, keepdim=True) + 1e-8)
-    ls = ls / (ls.norm(dim=1, keepdim=True) + 1e-8)
-    cos_sim = (lo * ls).sum(dim=1).mean()
-    return 1 - cos_sim
-
-def train_model(model, dataloader, epochs=1, lr=1e-4, device='cpu'):
-    model.to(device).train()
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.MSELoss()
-    history = []
-    for _ in range(epochs):
-        epoch_loss = 0.0
-        for imgs, _ in dataloader:
-            imgs = imgs.to(device)
-            opt.zero_grad()
-            out = model(imgs)
-            loss = loss_fn(out, imgs)
-            loss.backward()
-            opt.step()
-            epoch_loss += loss.item()
-        history.append(epoch_loss / max(1, len(dataloader)))
-    return model, history
-
-def train_with_consistency(model, dataloader, consistency_weight=0.1, epochs=1, lr=1e-4, device='cpu'):
-    model.to(device).train()
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    base_loss_fn = nn.MSELoss()
-    history = []
-    for _ in range(epochs):
-        epoch_loss = 0.0
-        for imgs, _ in dataloader:
-            imgs = imgs.to(device)
-            opt.zero_grad()
-            latent_orig = model.backbone(imgs)
-            out = model.decoder(latent_orig)
-            scaled = F.interpolate(imgs, scale_factor=0.8, mode='bilinear', align_corners=False)
-            latent_scaled = model.backbone(scaled)
-            loss = base_loss_fn(out, imgs) + consistency_weight * multi_scale_loss(latent_orig, latent_scaled)
-            loss.backward()
-            opt.step()
-            epoch_loss += loss.item()
-        history.append(epoch_loss / max(1, len(dataloader)))
-    return model, history
-
-class AdaptivePositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_resolution=(256,256)):
-        super().__init__()
-        self.d_model = d_model
-        self.adapt_scale = nn.Parameter(torch.ones(1))
-        self.proj = nn.Conv2d(2, d_model, 1)
-    def forward(self, x):
-        B, C, H, W = x.shape
-        y = torch.linspace(0, 1, steps=H, device=x.device)
-        z = torch.linspace(0, 1, steps=W, device=x.device)
-        gy, gz = torch.meshgrid(y, z, indexing='ij')
-        pe = torch.stack([gy, gz], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)
-        pe = self.proj(pe) * self.adapt_scale
-        return x + pe
-
-class TRExFiTAdaptivePE(TRExFiT):
-    def __init__(self, in_channels=3, hidden_size=64, d_model=64, use_adaptive_pe=True):
-        super().__init__(in_channels=in_channels, hidden_size=hidden_size)
-        self.use_adaptive_pe = use_adaptive_pe
-        self.adaptive_pe = AdaptivePositionalEncoding(d_model=d_model) if use_adaptive_pe else nn.Identity()
-    def forward(self, x, target_resolution=None):
-        latent = self.backbone(x)
-        latent = self.adaptive_pe(latent) if self.use_adaptive_pe else latent
-        if target_resolution is not None:
-            latent = self.trainable_upsampler(latent)
-            latent = F.interpolate(latent, size=target_resolution, mode='bicubic', align_corners=False)
-        return self.decoder(latent)
+def get_encoder_latent(x):
+    """Wrapper for the dummy encoder – in practice, replace with a pretrained encoder """
+    encoder = DummyEncoder().to(x.device)
+    encoder.eval()
+    with torch.no_grad():
+        return encoder(x)
