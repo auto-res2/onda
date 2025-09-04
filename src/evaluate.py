@@ -111,3 +111,28 @@ def ensure_images_directory():
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
     return images_dir
+
+def plot_loss_curve(loss_history, title, filename):
+    plt.figure()
+    plt.plot(loss_history, marker='o')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title(title)
+    plt.grid(True)
+    plt.savefig(filename, bbox_inches="tight")
+    plt.close()
+    print(f"Loss curve saved as {filename}")
+
+def visualize_token_grid(image_np, token_resolution, filename='inference_token_grid.pdf'):
+    H, W, _ = image_np.shape
+    th, tw = token_resolution
+    fig, ax = plt.subplots()
+    ax.imshow(image_np)
+    for i in range(1, tw):
+        ax.axvline(x=i * (W / tw), color='red', linestyle='--')
+    for j in range(1, th):
+        ax.axhline(y=j * (H / th), color='red', linestyle='--')
+    plt.title("Token Grid Overlay")
+    plt.savefig(filename, bbox_inches="tight")
+    plt.close()
+    print(f"Token grid visualization saved as {filename}")

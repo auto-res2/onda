@@ -40,3 +40,21 @@ def set_random_seeds(seed=42):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+from torch.utils.data import Dataset, DataLoader
+
+class DummyImageDataset(Dataset):
+    def __init__(self, num_samples=32, image_size=(256,256), num_channels=3):
+        self.num_samples = num_samples
+        self.image_size = image_size
+        self.num_channels = num_channels
+    def __len__(self): 
+        return self.num_samples
+    def __getitem__(self, idx):
+        img = torch.rand(self.num_channels, *self.image_size)
+        label = 0
+        return img, label
+
+def get_trexfit_dataloader(batch_size=8, num_samples=32, image_size=(256,256)):
+    dataset = DummyImageDataset(num_samples=num_samples, image_size=image_size)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
